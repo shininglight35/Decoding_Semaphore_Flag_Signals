@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web Semaphore Decoder</title>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/vision_bundle.js" crossorigin="anonymous"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -16,37 +15,42 @@
         }
         .container {
             position: relative;
-            display: inline-block;
-            margin-top: 20px;
+            width: 640px;
+            height: 480px;
+            margin: 20px auto;
         }
         video, canvas {
             position: absolute;
             left: 0;
             top: 0;
-            transform: scaleX(-1); /* Mirrors the webcam to match your Python cv2.flip(frame, 1) */
+            width: 640px;
+            height: 480px;
+            transform: scaleX(-1); /* Mirrors webcam feed */
         }
         #webcam {
-            opacity: 0; /* Hidden but running; we draw the frames onto the canvas instead */
+            display: none; /* Keep raw video element hidden, we paint frames on the canvas */
         }
         .ui-overlay {
-            margin-top: 500px; /* Pushes text controls below the video canvas box */
+            margin-top: 20px;
             background: #1e1e1e;
             padding: 20px;
             border-radius: 10px;
             display: inline-block;
+            min-width: 300px;
         }
         h2 { margin: 5px 0; }
         #output { color: #ff3333; font-size: 2rem; font-weight: bold; }
         #category { color: #3388ff; }
+        #status { color: #ffcc00; font-weight: bold; margin-bottom: 10px; }
     </style>
 </head>
 <body>
 
     <h1>Semaphore Flag Signaling Decoder</h1>
-    <p>Align your whole body in the camera frame.</p>
+    <div id="status">Loading AI Models... Please wait.</div>
 
     <div class="container">
-        <video id="webcam" width="640" height="480" autoplay playsinline></video>
+        <video id="webcam" autoplay playsinline></video>
         <canvas id="output_canvas" width="640" height="480"></canvas>
     </div>
 
@@ -61,6 +65,7 @@
         const video = document.getElementById("webcam");
         const canvasElement = document.getElementById("output_canvas");
         const canvasCtx = canvasElement.getContext("2d");
+        const statusDiv = document.getElementById("status");
         
         let poseLandmarker = undefined;
         let lastVideoTime = -1;
@@ -69,39 +74,56 @@
         let detectedSema4 = [];
         let lastDetectionTime = 0;
         let resetDetectionTime = 0;
-        const gestureDelay = 2500; // 2.5 seconds in milliseconds
+        const gestureDelay = 2500; // 2.5 seconds
         let z = "Letter";
         let count = 0;
         let prevLeftAng = 0;
         let prevRightAng = 0;
 
         // Initialize MediaPipe Pose Landmarker
-        async function createPoseLandmarker() {
-            const vision = await FilesetResolver.forVisionTasks(
-                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
-            );
-            poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full.task`,
-                    delegate: "GPU"
-                },
-                runningMode: "VIDEO",
-                outputSegmentationMasks: false
-            });
-            setupCamera();
+        async function init() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+                );
+                poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    outputSegmentationMasks: false
+                });
+                statusDiv.innerText = "Models Loaded! Requesting Camera Access...";
+                setupCamera();
+            } catch (error) {
+                statusDiv.innerText = "Error loading AI models. Make sure you are using a local server setup.";
+                console.error(error);
+            }
         }
 
-        // Setup Webcam
+        // Setup Webcam with explicitly handled permissions
         function setupCamera() {
-            navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } }).then((stream) => {
-                video.srcObject = stream;
-                video.addEventListener("loadeddata", predictWebcam);
-            });
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+                .then((stream) => {
+                    video.srcObject = stream;
+                    video.addEventListener("loadeddata", () => {
+                        statusDiv.innerText = "System Running Live!";
+                        predictWebcam();
+                    });
+                })
+                .catch((err) => {
+                    statusDiv.innerText = "Camera access denied or webcam not found.";
+                    console.error(err);
+                });
+            } else {
+                statusDiv.innerText = "Your browser does not support webcam access.";
+            }
         }
 
         // --- Mathematical Angle Calculation Logic ---
         function calculateAngle(a, b, c) {
-            // Vector calculation matching your Python math blocks
             let ba = [a.x - b.x, a.y - b.y];
             let bc = [c.x - b.x, c.y - b.y];
 
@@ -115,14 +137,14 @@
             if (crossProduct < 0) {
                 angle = -angle;
             }
-            return angle * (180 / Math.PI); // Convert radians to degrees
+            return angle * (180 / Math.PI); // Radians to Degrees
         }
 
         // Frame Processing Loop
         async function predictWebcam() {
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             
-            // Draw the mirrored webcam feed onto the canvas background
+            // Render the webcam frame flipped onto the canvas background
             canvasCtx.save();
             canvasCtx.translate(canvasElement.width, 0);
             canvasCtx.scale(-1, 1);
@@ -133,13 +155,14 @@
                 lastVideoTime = video.currentTime;
                 let startTimeMs = performance.now();
                 
+                // Fetch landmarks synchronously for the exact current timestamp
                 const results = poseLandmarker.predictForVideo(video, startTimeMs);
                 const drawingUtils = new DrawingUtils(canvasCtx);
 
                 if (results.landmarks && results.landmarks.length > 0) {
                     const landmarks = results.landmarks[0];
 
-                    // Draw the skeleton lines visually over the video frame
+                    // Draw skeleton lines visually over video canvas frame
                     drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS);
                     drawingUtils.drawLandmarks(landmarks, { radius: 4, color: "#00FF00" });
 
@@ -161,154 +184,153 @@
 
                     let currentTime = performance.now();
 
-                    // --- Your Gesture Logic Decision Tree ---
+                    // --- Gesture Logic Tree ---
                     if ((leftArmAngle > 170 && leftArmAngle < 180) || (leftArmAngle < -170 && leftArmAngle > -180)) {
                         if ((rightArmAngle > 170 && rightArmAngle < 180) || (rightArmAngle < -170 && rightArmAngle > -180)) {
 
-                            // Condition A / 1
+                            // A / 1
                             if (leftShoulderAngle > 35 && leftShoulderAngle < 55 && rightShoulderAngle < 0 && rightShoulderAngle > -20) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "A" : "1");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition B / 2
+                            // B / 2
                             if (leftShoulderAngle > 80 && leftShoulderAngle < 100 && rightShoulderAngle < 0 && rightShoulderAngle > -20) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "B" : "2");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition C / 3
+                            // C / 3
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && rightShoulderAngle < 0 && rightShoulderAngle > -20) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "C" : "3");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition D / 4
+                            // D / 4
                             if (Math.abs(leftShoulderAngle) > 170 && Math.abs(leftShoulderAngle) < 180 && rightShoulderAngle < 0 && rightShoulderAngle > -20) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "D" : "4");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition E / 5
+                            // E / 5
                             if (leftShoulderAngle > 0 && leftShoulderAngle < 20 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "E" : "5");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition F / 6
+                            // F / 6
                             if (leftShoulderAngle > 0 && leftShoulderAngle < 20 && rightShoulderAngle < -80 && rightShoulderAngle > -100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "F" : "6");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition G / 7
+                            // G / 7
                             if (leftShoulderAngle > 0 && leftShoulderAngle < 20 && rightShoulderAngle < -35 && rightShoulderAngle > -55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "G" : "7");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition H / 8
+                            // H / 8
                             if (leftShoulderAngle > 80 && leftShoulderAngle < 100 && rightShoulderAngle > 35 && rightShoulderAngle < 55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "H" : "8");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition I / 9
+                            // I / 9
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && rightShoulderAngle > 35 && rightShoulderAngle < 55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "I" : "9");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition J / 0
+                            // J / 0
                             if (Math.abs(leftShoulderAngle) > 170 && Math.abs(leftShoulderAngle) < 180 && rightShoulderAngle < -80 && rightShoulderAngle > -100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     detectedSema4.push(z === "Letter" ? "J" : "0");
                                     lastDetectionTime = currentTime;
                                 }
                             }
-                            // Condition K
+                            // K
                             if (leftShoulderAngle > 35 && leftShoulderAngle < 55 && Math.abs(rightShoulderAngle) > 170 && Math.abs(rightShoulderAngle) < 180) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("K"); lastDetectionTime = currentTime; }
                             }
-                            // Condition L
+                            // L
                             if (leftShoulderAngle > 35 && leftShoulderAngle < 55 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("L"); lastDetectionTime = currentTime; }
                             }
-                            // Condition M
+                            // M
                             if (leftShoulderAngle > 35 && leftShoulderAngle < 55 && rightShoulderAngle < -80 && rightShoulderAngle > -100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("M"); lastDetectionTime = currentTime; }
                             }
-                            // Condition N
+                            // N
                             if (leftShoulderAngle > 35 && leftShoulderAngle < 55 && rightShoulderAngle < -35 && rightShoulderAngle > -55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("N"); lastDetectionTime = currentTime; }
                             }
-                            // Condition O
+                            // O
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && rightShoulderAngle > 80 && rightShoulderAngle < 100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("O"); lastDetectionTime = currentTime; }
                             }
-                            // Condition P
+                            // P
                             if (leftShoulderAngle > 80 && leftShoulderAngle < 100 && Math.abs(rightShoulderAngle) > 170 && Math.abs(rightShoulderAngle) < 180) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("P"); lastDetectionTime = currentTime; }
                             }
-                            // Condition Q
+                            // Q
                             if (leftShoulderAngle > 80 && leftShoulderAngle < 100 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("Q"); lastDetectionTime = currentTime; }
                             }
-                            // Condition R
+                            // R
                             if (leftShoulderAngle > 80 && leftShoulderAngle < 100 && rightShoulderAngle < -80 && rightShoulderAngle > -100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("R"); lastDetectionTime = currentTime; }
                             }
-                            // Condition S
+                            // S
                             if (leftShoulderAngle > 80 && leftShoulderAngle < 100 && rightShoulderAngle < -35 && rightShoulderAngle > -55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("S"); lastDetectionTime = currentTime; }
                             }
-                            // Condition T
+                            // T
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && Math.abs(rightShoulderAngle) > 170 && Math.abs(rightShoulderAngle) < 180) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("T"); lastDetectionTime = currentTime; }
                             }
-                            // Condition U
+                            // U
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("U"); lastDetectionTime = currentTime; }
                             }
-                            // Condition V
+                            // V
                             if (Math.abs(leftShoulderAngle) > 170 && Math.abs(leftShoulderAngle) < 180 && rightShoulderAngle < -35 && rightShoulderAngle > -55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("V"); lastDetectionTime = currentTime; }
                             }
-                            // Condition W
+                            // W
                             if (leftShoulderAngle < -80 && leftShoulderAngle > -100 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("W"); lastDetectionTime = currentTime; }
                             }
-                            // Condition X
+                            // X
                             if (leftShoulderAngle < -35 && leftShoulderAngle > -55 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("X"); lastDetectionTime = currentTime; }
                             }
-                            // Condition Y
+                            // Y
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && rightShoulderAngle < -80 && rightShoulderAngle > -100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("Y"); lastDetectionTime = currentTime; }
                             }
-                            // Condition Z
+                            // Z
                             if (leftShoulderAngle < -35 && leftShoulderAngle > -55 && rightShoulderAngle < -80 && rightShoulderAngle > -100) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { if (z === "Letter") detectedSema4.push("Z"); lastDetectionTime = currentTime; }
                             }
 
-                            // Switch to Letters Mode
+                            // Mode Switching
                             if (leftShoulderAngle < 0 && leftShoulderAngle > -10 && rightShoulderAngle > 0 && rightShoulderAngle < 10) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { z = "Letter"; lastDetectionTime = currentTime; }
                             }
-                            // Switch to Numbers Mode
                             if (Math.abs(leftShoulderAngle) > 170 && Math.abs(leftShoulderAngle) < 180 && rightShoulderAngle < -125 && rightShoulderAngle > -145) {
                                 if (currentTime - lastDetectionTime > gestureDelay) { z = "Number"; lastDetectionTime = currentTime; }
                             }
-                            // Backspace / Pop (With fixed crash safety check)
+                            // Pop / Backspace
                             if (leftShoulderAngle > 125 && leftShoulderAngle < 145 && rightShoulderAngle < -35 && rightShoulderAngle > -55) {
                                 if (currentTime - lastDetectionTime > gestureDelay) {
                                     if (detectedSema4.length > 0) detectedSema4.pop();
@@ -316,14 +338,14 @@
                                 }
                             }
 
-                            // Tracking baseline frame differences for resetting array
+                            // Frame reset logic
                             if (currentTime - resetDetectionTime > 500) {
                                 prevLeftAng = leftShoulderAngle;
                                 prevRightAng = rightShoulderAngle;
                                 resetDetectionTime = currentTime;
                             }
 
-                            // Clear Screen Action (4 rapid extreme frame shifts)
+                            // Clear array action
                             if (currentTime - lastDetectionTime > gestureDelay) {
                                 if (Math.abs(prevLeftAng - leftShoulderAngle) > 100 && Math.abs(prevRightAng - rightShoulderAngle) > 100) {
                                     count++;
@@ -339,16 +361,16 @@
                 }
             }
 
-            // Update UI Elements dynamically
+            // Update UI elements 
             document.getElementById("output").innerText = detectedSema4.join("");
             document.getElementById("category").innerText = z;
 
-            // Loop back to next camera frame
+            // Recurse to process the next frame loop smoothly
             window.requestAnimationFrame(predictWebcam);
         }
 
-        // Start application
-        createPoseLandmarker();
+        // Run setup
+        init();
     </script>
 </body>
 </html>
